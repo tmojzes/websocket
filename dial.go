@@ -63,6 +63,16 @@ type DialOptions struct {
 	// Unlike OnPingReceived, this callback does not return a value because a pong frame
 	// is a response to a ping and does not trigger any further frame transmission.
 	OnPongReceived func(ctx context.Context, payload []byte)
+
+	// WriteBufferSize sets the size in bytes of the buffer through which the
+	// client masks and writes frames. Client frames must be masked, so their
+	// payload is copied through this buffer, which is flushed to the
+	// connection every time it fills. A buffer at least as large as the
+	// frames being written lets each frame go out in a single write, which
+	// matters for throughput on bulk transfers.
+	//
+	// Defaults to 4096 bytes when zero or negative.
+	WriteBufferSize int
 }
 
 func (opts *DialOptions) cloneWithDefaults(ctx context.Context) (context.Context, context.CancelFunc, *DialOptions) {
@@ -198,7 +208,7 @@ func dial(ctx context.Context, urls string, opts *DialOptions, rand io.Reader) (
 		onPingReceived: opts.OnPingReceived,
 		onPongReceived: opts.OnPongReceived,
 		br:             getBufioReader(rwc),
-		bw:             getBufioWriter(rwc),
+		bw:             getClientBufioWriter(rwc, opts.WriteBufferSize),
 	}), resp, nil
 }
 
@@ -374,6 +384,24 @@ func getBufioWriter(w io.Writer) *bufio.Writer {
 	return bw
 }
 
+// defaultWriteBufferSize is the size of writers from bufioWriterPool, the
+// bufio package default.
+const defaultWriteBufferSize = 4096
+
+// getClientBufioWriter returns a pooled default-size writer, or a dedicated
+// writer when the dialer asked for a different size.
+func getClientBufioWriter(w io.Writer, size int) *bufio.Writer {
+	if size <= 0 || size == defaultWriteBufferSize {
+		return getBufioWriter(w)
+	}
+	return bufio.NewWriterSize(w, size)
+}
+
 func putBufioWriter(bw *bufio.Writer) {
+	// Keep the pool homogeneous so that getBufioWriter always returns a
+	// default-size writer.
+	if bw.Size() != defaultWriteBufferSize {
+		return
+	}
 	bufioWriterPool.Put(bw)
 }
